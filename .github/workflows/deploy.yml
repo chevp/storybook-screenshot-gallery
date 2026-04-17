@@ -1,0 +1,58 @@
+name: Deploy gallery
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-gallery
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    # Keep in sync with @playwright/test in package.json and PLAYWRIGHT_IMAGE in scripts/deploy.sh.
+    container: mcr.microsoft.com/playwright:v1.48.2-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run scenario screenshots
+        run: |
+          npx playwright test e2e/scenarios/ \
+            || echo "⚠ some playwright scenarios failed — gallery will ship only the screenshots that were produced"
+
+      - name: Guard against empty gallery
+        run: |
+          count=$(find e2e/screenshots/scenarios -name '*.png' 2>/dev/null | wc -l)
+          echo "playwright produced $count screenshot(s)"
+          [ "$count" -gt 0 ] || { echo "::error::no screenshots produced"; exit 3; }
+
+      - name: Build Storybook
+        run: |
+          npm run storybook:build
+          cp scripts/.htaccess  storybook-static/ 2>/dev/null || true
+          cp scripts/robots.txt storybook-static/ 2>/dev/null || true
+
+      - name: Upload via FTPS
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_PORT: ${{ secrets.FTP_PORT || '21' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || 'gallery' }}
+        run: |
+          apt-get update -qq && apt-get install -y -qq lftp
+          lftp <<LFTP
+            set ftp:ssl-force true
+            set ftp:ssl-protect-data true
+            set ssl:verify-certificate no
+            set net:max-retries 3
+            set net:reconnect-interval-base 5
+            open -u "$FTP_USERNAME","$FTP_PASSWORD" -p "$FTP_PORT" "$FTP_HOST"
+            mirror -R --parallel=4 --verbose storybook-static/ "/$DEPLOY_PATH/"
+            bye
+          LFTP
