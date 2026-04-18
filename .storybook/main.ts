@@ -16,6 +16,14 @@ const config: StorybookConfig = {
   features: {
     sidebarOnboardingChecklist: false,
   },
+  // Project-pages deploys (e.g. GitHub Pages) live under /<repo>/ — pass that
+  // prefix via STORYBOOK_BASE so assets and <base href> resolve correctly.
+  // Root deploys (FTPS, user/org pages, custom domain) leave this unset.
+  viteFinal: async (config) => {
+    const base = process.env.STORYBOOK_BASE;
+    if (base) config.base = base;
+    return config;
+  },
 };
 
 export default config;
