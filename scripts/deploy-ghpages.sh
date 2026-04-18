@@ -44,6 +44,10 @@ GHPAGES_REMOTE="${GHPAGES_REMOTE:-origin}"
 
 # Keep the image tag aligned with @playwright/test in package.json.
 PLAYWRIGHT_IMAGE="${PLAYWRIGHT_IMAGE:-mcr.microsoft.com/playwright:v1.48.2-jammy}"
+# Storybook 10 needs Node ≥20.19, which the pinned Playwright image doesn't
+# ship. Build Storybook in a separate Node container so we don't have to bump
+# Playwright just to satisfy Storybook's engine check.
+NODE_IMAGE="${NODE_IMAGE:-node:22-bookworm-slim}"
 
 # Infer STORYBOOK_BASE from the remote URL if the caller didn't set it.
 # chevp/storybook-screenshot-gallery → /storybook-screenshot-gallery/
@@ -62,16 +66,16 @@ fi
 [[ "$STORYBOOK_BASE" == /* ]] || STORYBOOK_BASE="/$STORYBOOK_BASE"
 [[ "$STORYBOOK_BASE" == */ ]] || STORYBOOK_BASE="$STORYBOOK_BASE/"
 
-echo "▶ Building storybook-static inside $PLAYWRIGHT_IMAGE (base=$STORYBOOK_BASE)"
 # Clean the screenshots dir FIRST so we never ship stale PNGs from a previous
 # run — a partial Playwright failure must be visible, not masked by leftovers.
 rm -rf "$REPO_ROOT/e2e/screenshots/scenarios"
+rm -rf "$REPO_ROOT/storybook-static"
 
+echo "▶ Stage 1/2: Playwright screenshots in $PLAYWRIGHT_IMAGE"
 docker run --rm \
   -v "$REPO_ROOT:/work" \
   -w /work \
   -e CI=true \
-  -e STORYBOOK_BASE="$STORYBOOK_BASE" \
   "$PLAYWRIGHT_IMAGE" \
   bash -ec '
     npm ci
@@ -83,8 +87,21 @@ docker run --rm \
       echo "✗ no screenshots produced — aborting before we publish an empty gallery" >&2
       exit 3
     fi
+  '
+
+echo "▶ Stage 2/2: Storybook build in $NODE_IMAGE (base=$STORYBOOK_BASE)"
+# Reinstall under Node 22 — the Playwright-image node_modules may contain
+# native bindings compiled for a different Node ABI.
+docker run --rm \
+  -v "$REPO_ROOT:/work" \
+  -w /work \
+  -e CI=true \
+  -e STORYBOOK_BASE="$STORYBOOK_BASE" \
+  "$NODE_IMAGE" \
+  bash -ec '
+    rm -rf node_modules
+    npm ci
     npm run storybook:build
-    touch storybook-static/.nojekyll
     cp scripts/robots.txt storybook-static/ 2>/dev/null || true
     cp scripts/CNAME      storybook-static/ 2>/dev/null || true
   '
@@ -110,6 +127,13 @@ rm -rf "$TARGET"
 mkdir -p "$TARGET"
 cp -R "$ARTIFACT_DIR"/. "$TARGET"/
 
+# .nojekyll MUST sit at the published root or Pages runs Jekyll over the
+# build — and Jekyll chokes on Storybook's _-prefixed asset dirs. Write it
+# on the host (post-cp) so a stray Docker file-permission issue can't drop it.
+: > "$TARGET/.nojekyll"
+[[ -f "$TARGET/.nojekyll" ]] || { echo "✗ failed to create $DOCS_DIR/.nojekyll" >&2; exit 1; }
+
+git add -f "$DOCS_DIR/.nojekyll"
 git add "$DOCS_DIR"
 if git diff --cached --quiet -- "$DOCS_DIR"; then
   echo "✓ No changes in $DOCS_DIR/ — already up-to-date."
