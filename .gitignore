@@ -7,3 +7,4 @@ e2e/screenshots/
 scripts/.env
 .DS_Store
 *.log
+.claude/
